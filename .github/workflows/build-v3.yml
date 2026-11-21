@@ -1,0 +1,641 @@
+name: Build APK v2
+on:
+  workflow_dispatch:
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Criar projeto
+        run: |
+          mkdir -p .
+          cat > settings.gradle.kts <<'__EOF__'
+          pluginManagement { repositories { google(); mavenCentral(); gradlePluginPortal() } }
+          dependencyResolutionManagement { repositories { google(); mavenCentral() } }
+          rootProject.name = "Player"
+          include(":app")
+          __EOF__
+          mkdir -p .
+          cat > build.gradle.kts <<'__EOF__'
+          plugins {
+              id("com.android.application") version "8.5.2" apply false
+              id("org.jetbrains.kotlin.android") version "1.9.24" apply false
+          }
+          __EOF__
+          mkdir -p .
+          cat > gradle.properties <<'__EOF__'
+          android.useAndroidX=true
+          org.gradle.jvmargs=-Xmx2g
+          __EOF__
+          mkdir -p app
+          cat > app/build.gradle.kts <<'__EOF__'
+          plugins { id("com.android.application"); id("org.jetbrains.kotlin.android") }
+          android {
+              namespace = "com.player.music"
+              compileSdk = 34
+              defaultConfig { applicationId = "com.player.music.v2"; minSdk = 26; targetSdk = 34; versionCode = 1; versionName = "2.0" }
+              buildFeatures { compose = true }
+              composeOptions { kotlinCompilerExtensionVersion = "1.5.14" }
+              compileOptions { sourceCompatibility = JavaVersion.VERSION_17; targetCompatibility = JavaVersion.VERSION_17 }
+              kotlinOptions { jvmTarget = "17" }
+          }
+          dependencies {
+              implementation(platform("androidx.compose:compose-bom:2024.09.00"))
+              implementation("androidx.compose.ui:ui")
+              implementation("androidx.compose.foundation:foundation")
+              implementation("androidx.compose.material3:material3")
+              implementation("androidx.activity:activity-compose:1.9.2")
+              implementation("androidx.core:core-ktx:1.13.1")
+              implementation("androidx.media3:media3-exoplayer:1.4.1")
+              implementation("androidx.media3:media3-session:1.4.1")
+          }
+          __EOF__
+          mkdir -p app/src/main
+          cat > app/src/main/AndroidManifest.xml <<'__EOF__'
+          <?xml version="1.0" encoding="utf-8"?>
+          <manifest xmlns:android="http://schemas.android.com/apk/res/android">
+              <uses-permission android:name="android.permission.READ_MEDIA_AUDIO"/>
+              <uses-permission android:name="android.permission.READ_EXTERNAL_STORAGE" android:maxSdkVersion="32"/>
+              <uses-permission android:name="android.permission.FOREGROUND_SERVICE"/>
+              <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MEDIA_PLAYBACK"/>
+              <uses-permission android:name="android.permission.POST_NOTIFICATIONS"/>
+              <uses-permission android:name="android.permission.WAKE_LOCK"/>
+              <application android:label="Player Plus" android:icon="@mipmap/ic_launcher" android:theme="@android:style/Theme.DeviceDefault.NoActionBar">
+                  <activity android:name=".MainActivity" android:exported="true">
+                      <intent-filter>
+                          <action android:name="android.intent.action.MAIN"/>
+                          <category android:name="android.intent.category.LAUNCHER"/>
+                      </intent-filter>
+                  </activity>
+                  <service android:name=".PlaybackService" android:exported="true" android:foregroundServiceType="mediaPlayback">
+                      <intent-filter><action android:name="androidx.media3.session.MediaSessionService"/></intent-filter>
+                  </service>
+              </application>
+          </manifest>
+          __EOF__
+          mkdir -p app/src/main/java/com/player/music
+          cat > app/src/main/java/com/player/music/PlaybackService.kt <<'__EOF__'
+          package com.player.music
+
+          import androidx.media3.common.AudioAttributes
+          import androidx.media3.common.C
+          import androidx.media3.exoplayer.ExoPlayer
+          import androidx.media3.session.MediaSession
+          import androidx.media3.session.MediaSessionService
+
+          class PlaybackService : MediaSessionService() {
+              private var session: MediaSession? = null
+
+              override fun onCreate() {
+                  super.onCreate()
+                  val player = ExoPlayer.Builder(this)
+                      .setAudioAttributes(AudioAttributes.Builder().setContentType(C.AUDIO_CONTENT_TYPE_MUSIC).setUsage(C.USAGE_MEDIA).build(), true)
+                      .setHandleAudioBecomingNoisy(true)
+                      .setWakeMode(C.WAKE_MODE_LOCAL)
+                      .build()
+                  session = MediaSession.Builder(this, player).build()
+              }
+
+              override fun onGetSession(controllerInfo: MediaSession.ControllerInfo): MediaSession? = session
+
+              override fun onDestroy() {
+                  session?.run { player.release(); release() }
+                  session = null
+                  super.onDestroy()
+              }
+          }
+          __EOF__
+          mkdir -p app/src/main/java/com/player/music
+          cat > app/src/main/java/com/player/music/MainActivity.kt <<'__EOF__'
+          package com.player.music
+
+          import android.Manifest
+          import android.content.ComponentName
+          import android.content.Context
+          import android.content.ContentUris
+          import android.content.pm.PackageManager
+          import android.graphics.Bitmap
+          import android.graphics.BitmapFactory
+          import android.net.Uri
+          import android.os.Build
+          import android.os.Bundle
+          import android.provider.MediaStore
+          import androidx.activity.ComponentActivity
+          import androidx.activity.compose.BackHandler
+          import androidx.activity.compose.rememberLauncherForActivityResult
+          import androidx.activity.compose.setContent
+          import androidx.activity.result.contract.ActivityResultContracts
+          import androidx.compose.foundation.Canvas
+          import androidx.compose.foundation.Image
+          import androidx.compose.foundation.background
+          import androidx.compose.foundation.clickable
+          import androidx.compose.foundation.horizontalScroll
+          import androidx.compose.foundation.layout.*
+          import androidx.compose.foundation.lazy.LazyColumn
+          import androidx.compose.foundation.lazy.items
+          import androidx.compose.foundation.rememberScrollState
+          import androidx.compose.foundation.shape.CircleShape
+          import androidx.compose.foundation.shape.RoundedCornerShape
+          import androidx.compose.material3.*
+          import androidx.compose.runtime.*
+          import androidx.compose.ui.Alignment
+          import androidx.compose.ui.Modifier
+          import androidx.compose.ui.draw.clip
+          import androidx.compose.ui.geometry.Offset
+          import androidx.compose.ui.geometry.Size
+          import androidx.compose.ui.graphics.Brush
+          import androidx.compose.ui.graphics.Color
+          import androidx.compose.ui.graphics.ImageBitmap
+          import androidx.compose.ui.graphics.Path
+          import androidx.compose.ui.graphics.asImageBitmap
+          import androidx.compose.ui.layout.ContentScale
+          import androidx.compose.ui.platform.LocalContext
+          import androidx.compose.ui.text.font.FontWeight
+          import androidx.compose.ui.text.style.TextAlign
+          import androidx.compose.ui.text.style.TextOverflow
+          import androidx.compose.ui.unit.Dp
+          import androidx.compose.ui.unit.dp
+          import androidx.compose.ui.unit.sp
+          import androidx.core.content.ContextCompat
+          import androidx.media3.common.MediaItem
+          import androidx.media3.common.MediaMetadata
+          import androidx.media3.common.Player
+          import androidx.media3.session.MediaController
+          import androidx.media3.session.SessionToken
+          import kotlinx.coroutines.Dispatchers
+          import kotlinx.coroutines.delay
+          import kotlinx.coroutines.withContext
+
+          private val Bg = Color(0xFF07090D)
+          private val Surf = Color(0xFF11161D)
+          private val Blue = Color(0xFF2158A8)
+          private val Teal = Color(0xFF08B3AE)
+          private val Mut = Color(0xFF8A94A3)
+          private val Grad = Brush.horizontalGradient(listOf(Blue, Teal))
+          private val artCache = android.util.LruCache<String, Bitmap>(120)
+
+          class MainActivity : ComponentActivity() {
+              override fun onCreate(savedInstanceState: Bundle?) {
+                  super.onCreate(savedInstanceState)
+                  setContent {
+                      MaterialTheme(colorScheme = darkColorScheme(primary = Teal, onPrimary = Color.Black, background = Bg, surface = Surf)) {
+                          Surface(Modifier.fillMaxSize(), color = Bg) { PlayerApp() }
+                      }
+                  }
+              }
+          }
+
+          fun loadSongs(ctx: Context): List<MediaItem> {
+              val out = ArrayList<MediaItem>()
+              val base = MediaStore.Audio.Media.EXTERNAL_CONTENT_URI
+              val proj = arrayOf(MediaStore.Audio.Media._ID, MediaStore.Audio.Media.TITLE, MediaStore.Audio.Media.ARTIST, MediaStore.Audio.Media.ALBUM, MediaStore.Audio.Media.ALBUM_ID)
+              ctx.contentResolver.query(base, proj, "${MediaStore.Audio.Media.IS_MUSIC} != 0", null, "${MediaStore.Audio.Media.TITLE} COLLATE NOCASE ASC")?.use { c ->
+                  while (c.moveToNext()) {
+                      val id = c.getLong(0)
+                      val artist = c.getString(2)?.takeIf { it != "<unknown>" } ?: "Artista desconhecido"
+                      val art = ContentUris.withAppendedId(Uri.parse("content://media/external/audio/albumart"), c.getLong(4))
+                      out.add(
+                          MediaItem.Builder()
+                              .setMediaId(id.toString())
+                              .setUri(ContentUris.withAppendedId(base, id))
+                              .setMediaMetadata(MediaMetadata.Builder().setTitle(c.getString(1)).setArtist(artist).setAlbumTitle(c.getString(3)).setArtworkUri(art).build())
+                              .build()
+                      )
+                  }
+              }
+              return out
+          }
+
+          fun keyOf(m: MediaItem, album: Boolean): String =
+              (if (album) m.mediaMetadata.albumTitle else m.mediaMetadata.artist)?.toString() ?: "Desconhecido"
+
+          fun fmt(ms: Long): String {
+              val s = (ms / 1000).coerceAtLeast(0)
+              return "%d:%02d".format(s / 60, s % 60)
+          }
+
+          suspend fun loadArt(ctx: Context, mi: MediaItem, px: Int): ImageBitmap? = withContext(Dispatchers.IO) {
+              val key = mi.mediaId + "_" + px
+              val hit = artCache.get(key)
+              if (hit != null) return@withContext hit.asImageBitmap()
+              val bmp: Bitmap? = try {
+                  if (Build.VERSION.SDK_INT >= 29) {
+                      ctx.contentResolver.loadThumbnail(mi.localConfiguration!!.uri, android.util.Size(px, px), null)
+                  } else {
+                      mi.mediaMetadata.artworkUri?.let { u -> ctx.contentResolver.openInputStream(u)?.use { BitmapFactory.decodeStream(it) } }
+                  }
+              } catch (e: Exception) { null }
+              if (bmp != null) artCache.put(key, bmp)
+              bmp?.asImageBitmap()
+          }
+
+          @Composable
+          fun Logo(s: Dp) {
+              Canvas(Modifier.size(s)) {
+                  val w = size.width
+                  val h = size.height
+                  val tri = Path().apply {
+                      moveTo(0.12f * w, 0.05f * h); lineTo(0.95f * w, 0.5f * h); lineTo(0.12f * w, 0.95f * h); close()
+                  }
+                  drawPath(tri, Brush.horizontalGradient(listOf(Blue, Teal), startX = 0.12f * w, endX = 0.95f * w))
+                  val facet = Path().apply {
+                      moveTo(0.12f * w, 0.257f * h); lineTo(0.587f * w, 0.689f * h); lineTo(0.12f * w, 0.95f * h); close()
+                  }
+                  drawPath(facet, Color(0x661F55A8))
+              }
+          }
+
+          @Composable
+          fun Ico(kind: Int, color: Color, s: Dp) {
+              Canvas(Modifier.size(s)) {
+                  val w = size.width
+                  val h = size.height
+                  when (kind) {
+                      0 -> drawPath(Path().apply { moveTo(0.2f * w, 0.1f * h); lineTo(0.95f * w, 0.5f * h); lineTo(0.2f * w, 0.9f * h); close() }, color)
+                      1 -> {
+                          drawRect(color, Offset(0.15f * w, 0.1f * h), Size(0.25f * w, 0.8f * h))
+                          drawRect(color, Offset(0.6f * w, 0.1f * h), Size(0.25f * w, 0.8f * h))
+                      }
+                      2 -> {
+                          drawPath(Path().apply { moveTo(0.1f * w, 0.15f * h); lineTo(0.75f * w, 0.5f * h); lineTo(0.1f * w, 0.85f * h); close() }, color)
+                          drawRect(color, Offset(0.8f * w, 0.15f * h), Size(0.12f * w, 0.7f * h))
+                      }
+                      else -> {
+                          drawPath(Path().apply { moveTo(0.9f * w, 0.15f * h); lineTo(0.25f * w, 0.5f * h); lineTo(0.9f * w, 0.85f * h); close() }, color)
+                          drawRect(color, Offset(0.08f * w, 0.15f * h), Size(0.12f * w, 0.7f * h))
+                      }
+                  }
+              }
+          }
+
+          @Composable
+          fun Art(mi: MediaItem?, s: Dp, px: Int, radius: Dp) {
+              val ctx = LocalContext.current
+              val bmp by produceState<ImageBitmap?>(null, mi?.mediaId) { value = if (mi == null) null else loadArt(ctx, mi, px) }
+              Box(Modifier.size(s).clip(RoundedCornerShape(radius)).background(Surf), contentAlignment = Alignment.Center) {
+                  val b = bmp
+                  if (b != null) Image(b, null, Modifier.fillMaxSize(), contentScale = ContentScale.Crop)
+                  else Logo(s * 0.5f)
+              }
+          }
+
+          @Composable
+          fun Chip(text: String, on: Boolean, click: () -> Unit) {
+              Box(Modifier.clip(RoundedCornerShape(20.dp)).background(if (on) Teal.copy(alpha = 0.18f) else Surf).clickable(onClick = click).padding(14.dp, 8.dp)) {
+                  Text(text, color = if (on) Teal else Mut, fontSize = 13.sp, fontWeight = FontWeight.Medium)
+              }
+          }
+
+          @Composable
+          fun PlayerApp() {
+              val ctx = LocalContext.current
+              var items by remember { mutableStateOf<List<MediaItem>>(emptyList()) }
+              var granted by remember { mutableStateOf(false) }
+              var ctrl by remember { mutableStateOf<MediaController?>(null) }
+              var playing by remember { mutableStateOf(false) }
+              var curId by remember { mutableStateOf<String?>(null) }
+              var shuffle by remember { mutableStateOf(false) }
+              var repeat by remember { mutableStateOf(Player.REPEAT_MODE_OFF) }
+              var query by remember { mutableStateOf("") }
+              var tab by remember { mutableStateOf(0) }
+              var group by remember { mutableStateOf<String?>(null) }
+              var expanded by remember { mutableStateOf(false) }
+              var pos by remember { mutableStateOf(0L) }
+              var dur by remember { mutableStateOf(0L) }
+              var seeking by remember { mutableStateOf(false) }
+              var speed by remember { mutableStateOf(1f) }
+              var sleepMin by remember { mutableStateOf(0) }
+              val prefs = remember { ctx.getSharedPreferences("player_v2", Context.MODE_PRIVATE) }
+              var favs by remember { mutableStateOf(prefs.getStringSet("favs", emptySet())!!.toSet()) }
+
+              fun toggleFav(id: String) {
+                  favs = if (id in favs) favs - id else favs + id
+                  prefs.edit().putStringSet("favs", favs).apply()
+              }
+
+              val perms = if (Build.VERSION.SDK_INT >= 33)
+                  arrayOf(Manifest.permission.READ_MEDIA_AUDIO, Manifest.permission.POST_NOTIFICATIONS)
+              else arrayOf(Manifest.permission.READ_EXTERNAL_STORAGE)
+              val launcher = rememberLauncherForActivityResult(ActivityResultContracts.RequestMultiplePermissions()) { r ->
+                  granted = r[perms[0]] == true
+              }
+              LaunchedEffect(Unit) {
+                  granted = ContextCompat.checkSelfPermission(ctx, perms[0]) == PackageManager.PERMISSION_GRANTED
+                  if (!granted) launcher.launch(perms)
+              }
+              LaunchedEffect(granted) { if (granted) items = withContext(Dispatchers.IO) { loadSongs(ctx) } }
+
+              DisposableEffect(Unit) {
+                  val future = MediaController.Builder(ctx, SessionToken(ctx, ComponentName(ctx, PlaybackService::class.java))).buildAsync()
+                  val listener = object : Player.Listener {
+                      override fun onIsPlayingChanged(isPlaying: Boolean) { playing = isPlaying }
+                      override fun onMediaItemTransition(mediaItem: MediaItem?, reason: Int) { curId = mediaItem?.mediaId }
+                      override fun onShuffleModeEnabledChanged(enabled: Boolean) { shuffle = enabled }
+                      override fun onRepeatModeChanged(mode: Int) { repeat = mode }
+                  }
+                  future.addListener({
+                      val c = future.get()
+                      ctrl = c
+                      c.addListener(listener)
+                      playing = c.isPlaying; curId = c.currentMediaItem?.mediaId; shuffle = c.shuffleModeEnabled; repeat = c.repeatMode
+                  }, ContextCompat.getMainExecutor(ctx))
+                  onDispose { ctrl?.removeListener(listener); MediaController.releaseFuture(future) }
+              }
+
+              LaunchedEffect(ctrl) {
+                  while (true) {
+                      val c = ctrl
+                      if (c != null && !seeking) { pos = c.currentPosition; dur = c.duration.coerceAtLeast(0L) }
+                      delay(400)
+                  }
+              }
+              LaunchedEffect(sleepMin) {
+                  if (sleepMin > 0) { delay(sleepMin * 60_000L); ctrl?.pause(); sleepMin = 0 }
+              }
+
+              val shown = remember(items, favs, tab, group, query) {
+                  val base = when {
+                      tab == 3 -> items.filter { it.mediaId in favs }
+                      group != null -> items.filter { keyOf(it, tab == 1) == group }
+                      else -> items
+                  }
+                  if (query.isBlank()) base
+                  else base.filter { "${it.mediaMetadata.title} ${it.mediaMetadata.artist} ${it.mediaMetadata.albumTitle}".contains(query, true) }
+              }
+              val groups = remember(items, tab, query) {
+                  items.groupBy { keyOf(it, tab == 1) }
+                      .filter { query.isBlank() || it.key.contains(query, true) }
+                      .toList().sortedBy { it.first.lowercase() }
+              }
+              val current = items.firstOrNull { it.mediaId == curId }
+
+              fun playFrom(list: List<MediaItem>, id: String) {
+                  val c = ctrl ?: return
+                  if (c.currentMediaItem?.mediaId == id) { if (!c.isPlaying) c.play() }
+                  else {
+                      c.setMediaItems(list, list.indexOfFirst { it.mediaId == id }.coerceAtLeast(0), 0L)
+                      c.prepare(); c.play()
+                  }
+              }
+
+              Box(Modifier.fillMaxSize().background(Bg)) {
+                  Column(Modifier.fillMaxSize()) {
+                      Row(Modifier.fillMaxWidth().padding(20.dp, 14.dp, 20.dp, 6.dp), verticalAlignment = Alignment.CenterVertically) {
+                          Logo(40.dp)
+                          Spacer(Modifier.weight(1f))
+                          Text("${items.size} músicas", color = Mut, fontSize = 13.sp)
+                      }
+                      OutlinedTextField(
+                          query, { query = it }, singleLine = true, shape = RoundedCornerShape(28.dp),
+                          placeholder = { Text("Buscar músicas, artistas, álbuns", color = Mut) },
+                          colors = OutlinedTextFieldDefaults.colors(
+                              focusedBorderColor = Teal, unfocusedBorderColor = Color.Transparent,
+                              focusedContainerColor = Surf, unfocusedContainerColor = Surf
+                          ),
+                          modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp)
+                      )
+                      Row(Modifier.horizontalScroll(rememberScrollState()).padding(16.dp, 12.dp), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                          listOf("Músicas", "Álbuns", "Artistas", "Favoritas").forEachIndexed { i, t ->
+                              Chip(t, tab == i) { tab = i; group = null }
+                          }
+                      }
+                      if (group != null) {
+                          Text("‹  $group", color = Teal, fontWeight = FontWeight.SemiBold, modifier = Modifier.clickable { group = null }.padding(20.dp, 4.dp, 20.dp, 8.dp))
+                      }
+                      if (!granted) Button(onClick = { launcher.launch(perms) }, modifier = Modifier.padding(16.dp)) { Text("Permitir acesso às músicas") }
+                      LazyColumn(Modifier.weight(1f), contentPadding = PaddingValues(bottom = 100.dp)) {
+                          if ((tab == 1 || tab == 2) && group == null) {
+                              items(groups, key = { it.first }) { g ->
+                                  Row(Modifier.fillMaxWidth().clickable { group = g.first }.padding(16.dp, 8.dp), verticalAlignment = Alignment.CenterVertically) {
+                                      Art(g.second.first(), 52.dp, 128, 12.dp)
+                                      Spacer(Modifier.width(12.dp))
+                                      Column(Modifier.weight(1f)) {
+                                          Text(g.first, color = Color.White, maxLines = 1, overflow = TextOverflow.Ellipsis, fontWeight = FontWeight.SemiBold)
+                                          Text("${g.second.size} músicas", color = Mut, fontSize = 13.sp)
+                                      }
+                                  }
+                              }
+                          } else {
+                              if (shown.isNotEmpty()) item {
+                                  Box(
+                                      Modifier.padding(16.dp, 4.dp, 16.dp, 8.dp).clip(RoundedCornerShape(24.dp)).background(Grad)
+                                          .clickable { ctrl?.let { it.shuffleModeEnabled = true; it.setMediaItems(shown); it.prepare(); it.play() } }
+                                          .padding(20.dp, 10.dp)
+                                  ) { Text("Tocar tudo aleatório", color = Color.White, fontWeight = FontWeight.SemiBold) }
+                              }
+                              if (shown.isEmpty()) item {
+                                  Text(if (tab == 3) "Toque no coração de uma música para ela aparecer aqui." else "Nenhuma música encontrada.", color = Mut, modifier = Modifier.padding(20.dp))
+                              }
+                              items(shown, key = { it.mediaId }) { mi ->
+                                  val on = mi.mediaId == curId
+                                  Row(Modifier.fillMaxWidth().clickable { playFrom(shown, mi.mediaId) }.padding(16.dp, 8.dp), verticalAlignment = Alignment.CenterVertically) {
+                                      Art(mi, 52.dp, 128, 12.dp)
+                                      Spacer(Modifier.width(12.dp))
+                                      Column(Modifier.weight(1f)) {
+                                          Text(mi.mediaMetadata.title?.toString() ?: "", color = if (on) Teal else Color.White, maxLines = 1, overflow = TextOverflow.Ellipsis, fontWeight = FontWeight.SemiBold)
+                                          Text(mi.mediaMetadata.artist?.toString() ?: "", color = Mut, fontSize = 13.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                                      }
+                                      Text(if (mi.mediaId in favs) "♥" else "♡", color = if (mi.mediaId in favs) Teal else Mut, fontSize = 22.sp, modifier = Modifier.clickable { toggleFav(mi.mediaId) }.padding(8.dp))
+                                  }
+                              }
+                          }
+                      }
+                  }
+
+                  if (current != null && !expanded) {
+                      Column(
+                          Modifier.align(Alignment.BottomCenter).fillMaxWidth().padding(12.dp).clip(RoundedCornerShape(22.dp)).background(Surf).clickable { expanded = true }
+                      ) {
+                          Row(Modifier.padding(10.dp), verticalAlignment = Alignment.CenterVertically) {
+                              Art(current, 46.dp, 128, 12.dp)
+                              Column(Modifier.weight(1f).padding(horizontal = 12.dp)) {
+                                  Text(current.mediaMetadata.title?.toString() ?: "", color = Color.White, maxLines = 1, overflow = TextOverflow.Ellipsis, fontWeight = FontWeight.SemiBold)
+                                  Text(current.mediaMetadata.artist?.toString() ?: "", color = Mut, fontSize = 12.sp, maxLines = 1)
+                              }
+                              Box(Modifier.clickable { ctrl?.seekToPrevious() }.padding(10.dp)) { Ico(3, Color.White, 20.dp) }
+                              Box(Modifier.clickable { ctrl?.let { if (it.isPlaying) it.pause() else it.play() } }.padding(10.dp)) { Ico(if (playing) 1 else 0, Teal, 24.dp) }
+                              Box(Modifier.clickable { ctrl?.seekToNext() }.padding(10.dp)) { Ico(2, Color.White, 20.dp) }
+                          }
+                          Box(Modifier.fillMaxWidth().height(3.dp).background(Bg)) {
+                              Box(Modifier.fillMaxWidth(if (dur > 0) (pos.toFloat() / dur).coerceIn(0f, 1f) else 0f).height(3.dp).background(Grad))
+                          }
+                      }
+                  }
+
+                  if (current != null && expanded) {
+                      BackHandler { expanded = false }
+                      Column(Modifier.fillMaxSize().background(Bg).padding(24.dp), horizontalAlignment = Alignment.CenterHorizontally) {
+                          Text("⌄  Fechar", color = Mut, modifier = Modifier.align(Alignment.Start).clickable { expanded = false }.padding(vertical = 8.dp))
+                          Spacer(Modifier.height(12.dp))
+                          Art(current, 300.dp, 640, 28.dp)
+                          Spacer(Modifier.height(24.dp))
+                          Row(verticalAlignment = Alignment.CenterVertically) {
+                              Column(Modifier.weight(1f)) {
+                                  Text(current.mediaMetadata.title?.toString() ?: "", color = Color.White, fontSize = 22.sp, fontWeight = FontWeight.Bold, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                                  Text(current.mediaMetadata.artist?.toString() ?: "", color = Mut, fontSize = 15.sp, maxLines = 1)
+                              }
+                              Text(if (current.mediaId in favs) "♥" else "♡", color = if (current.mediaId in favs) Teal else Mut, fontSize = 28.sp, modifier = Modifier.clickable { toggleFav(current.mediaId) }.padding(8.dp))
+                          }
+                          Slider(
+                              value = if (dur > 0) (pos.toFloat() / dur).coerceIn(0f, 1f) else 0f,
+                              onValueChange = { seeking = true; pos = (it * dur).toLong() },
+                              onValueChangeFinished = { ctrl?.seekTo(pos); seeking = false },
+                              colors = SliderDefaults.colors(thumbColor = Teal, activeTrackColor = Teal, inactiveTrackColor = Surf)
+                          )
+                          Row(Modifier.fillMaxWidth()) {
+                              Text(fmt(pos), color = Mut, fontSize = 12.sp)
+                              Spacer(Modifier.weight(1f))
+                              Text(fmt(dur), color = Mut, fontSize = 12.sp)
+                          }
+                          Spacer(Modifier.height(16.dp))
+                          Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(28.dp)) {
+                              Box(Modifier.clickable { ctrl?.seekToPrevious() }.padding(8.dp)) { Ico(3, Color.White, 30.dp) }
+                              Box(Modifier.size(76.dp).clip(CircleShape).background(Grad).clickable { ctrl?.let { if (it.isPlaying) it.pause() else it.play() } }, contentAlignment = Alignment.Center) {
+                                  Ico(if (playing) 1 else 0, Color.White, 32.dp)
+                              }
+                              Box(Modifier.clickable { ctrl?.seekToNext() }.padding(8.dp)) { Ico(2, Color.White, 30.dp) }
+                          }
+                          Spacer(Modifier.height(24.dp))
+                          Row(Modifier.horizontalScroll(rememberScrollState()), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                              Chip("Aleatório", shuffle) { ctrl?.let { it.shuffleModeEnabled = !it.shuffleModeEnabled } }
+                              Chip(when (repeat) { Player.REPEAT_MODE_ONE -> "Repetir uma"; Player.REPEAT_MODE_ALL -> "Repetir todas"; else -> "Repetir" }, repeat != Player.REPEAT_MODE_OFF) {
+                                  ctrl?.let {
+                                      it.repeatMode = when (it.repeatMode) {
+                                          Player.REPEAT_MODE_OFF -> Player.REPEAT_MODE_ALL
+                                          Player.REPEAT_MODE_ALL -> Player.REPEAT_MODE_ONE
+                                          else -> Player.REPEAT_MODE_OFF
+                                      }
+                                  }
+                              }
+                              Chip("Velocidade ${speed}x", speed != 1f) {
+                                  speed = when (speed) { 1f -> 1.25f; 1.25f -> 1.5f; 1.5f -> 2f; 2f -> 0.75f; else -> 1f }
+                                  ctrl?.setPlaybackSpeed(speed)
+                              }
+                              Chip(if (sleepMin == 0) "Timer" else "Timer ${sleepMin} min", sleepMin != 0) {
+                                  sleepMin = when (sleepMin) { 0 -> 15; 15 -> 30; 30 -> 60; else -> 0 }
+                              }
+                          }
+                      }
+                  }
+              }
+          }
+          __EOF__
+          mkdir -p app/src/main/res/mipmap-xxxhdpi
+          base64 -d > app/src/main/res/mipmap-xxxhdpi/ic_launcher.png <<'__EOF__'
+          iVBORw0KGgoAAAANSUhEUgAAAMAAAADACAMAAABlApw1AAABBmlDQ1BJQ0MgUHJvZmlsZQAAeJxj
+          YGCSYAACJgEGhty8kqIgdyeFiMgoBQYkkJhcXMCAGzAyMHy7BiIZGC7r4lGHC3CmpBYnA+kPQFxS
+          BLQcaGQKkC2SDmFXgNhJEHYPiF0UEuQMZC8AsjXSkdhJSOzykoISIPsESH1yQRGIfQfItsnNKU1G
+          uJuBJzUvNBhIRwCxDEMxQxCDO4MTGX7ACxDhmb+IgcHiKwMD8wSEWNJMBobtrQwMErcQYipAP/C3
+          MDBsO1+QWJQIFmIBYqa0NAaGT8sZGHgjGRiELzAwcEVj2oGICxx+VQD71Z0hHwjTGXIYUoEingx5
+          DMkMekCWEYMBgyGDGQBMpUCRBqmilgAAAYBQTFRFBrKzA62tA6ytAKyuAKysAKyrCKiuBqqtBKqt
+          C6KvDJ+uCaKvCaCvCZ+vCKSuB6WvBqavBqOuDZqsC52uC5qrC5msDJitC5isD5inCp2tCJ2tCZqs
+          D5SuDZStD4+tDo+sDY+tDpGpDJWtDJStC5KtEYquDoytD4usEIqoE4atEYasEIasEYSrE4ShFX+t
+          FICsFH2sEoCsF3qrFXusFH+oGHeqGXSqGXGrF3GqFXerFXKqHGyrGmyqGG6rF22rGHSoF3OjGW2n
+          GG2gHGipGmmpG2WpHWSqG2SpGmSpGGmpFmqqGGepGGWpIWCqHWGpHGKpHF6oGmOoGmKpGWOpG2Cp
+          GmWnGl+nHF2nGmGmGmKXIFqoIVinH1ioH1inG1uoHlinHFinG1ioHlumHlimHVimHFumHVqlHlil
+          G1qlHVqZHlenHVemHFenHFelHValHFamG1emGlenG1amGlGEEjZLDB0tCxYsBAkOAQIDAgECAQEC
+          AAECAAEBAQABAAABAAAA+VrA6wAAFDtJREFUeNrtnflXWskSx41mTNAk7joook9FR2OISlxQ1PgE
+          ESXigkgyDwFBcNgCZgMU+NdfVXXfBTVzMQGFc+g5M/Nrf6j61tZ924ZCja+GOkAdoA5QB6gD1AHq
+          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
+          __EOF__
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 17
+      - uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: 8.9
+      - name: Compilar
+        run: gradle assembleDebug --no-daemon
+      - uses: actions/upload-artifact@v4
+        with:
+          name: Player-v2-APK
+          path: app/build/outputs/apk/debug/app-debug.apk
